@@ -1,9 +1,9 @@
 name: Build Windows
 
-# windows-exeブランチのpush、手動実行、v*タグで動く。タグのときは、GitHub Releaseにzipを添付する。
+# Windowsブランチのpush、手動実行、v*タグで動く。タグのときは、GitHub Releaseにzipを添付する。
 on:
   push:
-    branches: [windows-exe]
+    branches: [Windows]
     tags: ['v*']
   workflow_dispatch:
 
