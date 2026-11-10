@@ -11,7 +11,12 @@ use gpui::{
 use pdf_core::{PdfDocument, PdfError};
 use pdf_viewer::PdfView;
 
-use crate::{recent::RecentFiles, reload::FileStamp, resize::resize_handles};
+use crate::{
+    recent::RecentFiles,
+    reload::{Watch, merged_snapshot, snapshot},
+    resize::resize_handles,
+    source_tab::{self, SourceTab, is_source},
+};
 
 actions!(
     pdf_view_app,
@@ -75,6 +80,8 @@ pub struct AppWindow {
     pub(crate) should_move: bool,
     /// PDFを開く前など、ビューがフォーカスを持たないときにキー操作(Ctrl+Oなど)を受けるためのもの。
     pub(crate) focus_handle: FocusHandle,
+    /// コンパイル中のTypst・LaTeXの文書(タブの`path`)。タブに「…」を出す。
+    pub(crate) compiling: Vec<PathBuf>,
     /// 表示中のPDFが書き換わっていないかの確認。持っている間だけ動く。
     _watch: Task<()>,
 }
@@ -83,10 +90,10 @@ pub struct AppWindow {
 pub(crate) struct Tab {
     pub(crate) path: PathBuf,
     pub(crate) viewer: Entity<PdfView>,
-    /// 表示中の文書を読んだときの、ファイルの目印。
-    pub(crate) loaded: Option<FileStamp>,
-    /// 前回の確認で見た、まだ読み込んでいない目印(書き込み途中でないかの確認用)。
-    pub(crate) pending: Option<FileStamp>,
+    /// 見張っているファイル(PDF、またはTypstの文書とその依存)と、その状態。
+    pub(crate) watch: Watch,
+    /// Typst・LaTeXの文書を開いているタブなら、その情報。
+    pub(crate) source: Option<SourceTab>,
 }
 
 /// ファイル名だけを取り出す。取れなければパス全体。
@@ -119,6 +126,7 @@ impl AppWindow {
             show_recent: false,
             should_move: false,
             focus_handle: cx.focus_handle(),
+            compiling: Vec::new(),
             _watch: Self::watch_active_file(window, cx),
         };
         match initial {
@@ -128,11 +136,25 @@ impl AppWindow {
         this
     }
 
-    /// 読み込み済みの文書を表示し、タイトルと最近のファイルを更新する。
+    /// 読み込み済みのPDFを表示し、タイトルと最近のファイルを更新する。
     pub(crate) fn show_document(
         &mut self,
         path: PathBuf,
         document: Arc<PdfDocument>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let watch = Watch::single(&path);
+        self.open_tab(path, document, watch, None, window, cx);
+    }
+
+    /// 文書を、`path`のタブで表示する。すでに開いていれば、そのタブへ切り替える。
+    fn open_tab(
+        &mut self,
+        path: PathBuf,
+        document: Arc<PdfDocument>,
+        watch: Watch,
+        source: Option<SourceTab>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -141,10 +163,10 @@ impl AppWindow {
             None => {
                 let viewer = cx.new(|cx| PdfView::new(document, cx));
                 self.tabs.push(Tab {
-                    loaded: FileStamp::of(&path),
-                    pending: None,
                     path: path.clone(),
                     viewer,
+                    watch,
+                    source,
                 });
                 self.tabs.len() - 1
             }
@@ -161,8 +183,13 @@ impl AppWindow {
         cx.notify();
     }
 
-    /// `path`のPDFをバックグラウンドで読み込んで表示する。失敗したらエラーを表示する。
+    /// `path`のファイルをバックグラウンドで読み込んで表示する。Typst(`.typ`)・LaTeX(`.tex`)の文書ならコンパイルして
+    /// PDFを表示する。失敗したらエラーを表示する。
     pub(crate) fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if is_source(&path) {
+            self.open_source(path, window, cx);
+            return;
+        }
         cx.spawn_in(window, async move |this, cx| {
             let target = path.clone();
             let loaded: Result<PdfDocument, PdfError> = cx
@@ -180,13 +207,57 @@ impl AppWindow {
         .detach();
     }
 
+    /// Typst・LaTeXの文書をコンパイルして、新しいタブで表示する(開いていればそのタブへ切り替える)。
+    /// コンパイルに失敗しても、エラーつきのタブを開く。直して保存すると、自動でコンパイルし直す。
+    fn open_source(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+            self.activate_tab(index, window, cx);
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let source = path.clone();
+            let (build, watch) = cx
+                .background_spawn(async move {
+                    let before_paths = vec![source.clone()];
+                    let before = snapshot(&before_paths);
+                    let build = source_tab::build(&source);
+                    let after = snapshot(&build.dependencies);
+                    let merged =
+                        merged_snapshot(&before_paths, &before, &build.dependencies, &after);
+                    let watch = Watch::new(build.dependencies.clone(), merged);
+                    (build, watch)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                // 最初のコンパイルが失敗したときは、空白のページに、エラーを重ねて見せる。
+                let document = match build.document {
+                    Some(document) => document,
+                    None => match source_tab::blank_document() {
+                        Ok(document) => document,
+                        Err(e) => {
+                            this.error = Some(format!("{}: {e}", file_name(&path)).into());
+                            cx.notify();
+                            return;
+                        }
+                    },
+                };
+                let source = SourceTab {
+                    diagnostics: build.diagnostics,
+                };
+                this.open_tab(path, Arc::new(document), watch, Some(source), window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// ファイル選択ダイアログを出して、選ばれたPDFを開く。
     pub(crate) fn open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         let selected = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open PDF".into()),
+            prompt: Some("Open PDF, EPUB, Typst or LaTeX".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             match selected.await {
@@ -318,6 +389,7 @@ impl Render for AppWindow {
             })
             .children(self.render_tab_bar(cx))
             .child(div().flex_1().min_h_0().w_full().child(content))
+            .children(self.render_diagnostics(cx))
             .when(client_side && !maximized, |d| d.children(resize_handles()))
             .children(self.render_recent_overlay(window, cx))
     }
