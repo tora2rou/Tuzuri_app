@@ -464,6 +464,14 @@ Zed向けGPUI製PDFビューアの開発過程を記録する。
 - 最初のコンパイルの間は、画面に変化が無い (「…」を出すタブがまだ無いため)。
 - LaTeX (`latexmk` などの外部コマンド) とEPUBは未着手。
 
+## ブランチの整理 (2026-11-10、ユーザー依頼: Windows・Linux・Chihayaburu・Tuzuriの4つにまとめる)
+- `Chihayaburu`: これまでの `main` (PDFビューア本体)。`auto-reload`・`epub` (LaTeX・EPUB)・`typst` を取り込んだ。
+- `Windows`: これまでの `windows-exe`。`Chihayaburu` を取り込んだ。
+- `Linux`: これまでの `linux-packaging`。`Chihayaburu` を取り込んだ。
+- `Tuzuri`: Zedのfork。GitHubの既定のブランチにした (`main` は無くした)。
+- `Windows` / `Linux` への取り込みで `main.rs` の `Startup` が競合した。ブランチ側は「開けなかったときのエラーをウィンドウに出す」構造体、`Chihayaburu` 側は「Typst・LaTeXの文書はウィンドウを開いてからコンパイルする」enumだったので、`document` / `source` / `error` を持つ1つの構造体にして両方を残した。
+- `build-windows.yml` / `build-linux.yml` が動くブランチ名を、新しい名前に直した。
+
 ## 今日の作業上の教訓
 - 外部コマンド (Tesseract) は、組み立てたデータだけでなく**実物で試す**。確信度0の単語と日本語の空白は、実物で初めて分かった。
 - GPUIの `ScrollHandle` の測定値 (`max_offset`) は描画のあとで更新される。描画の中で使うと1フレーム遅れる。
