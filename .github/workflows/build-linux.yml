@@ -1,9 +1,9 @@
 name: Build Linux
 
-# linux-packagingブランチのpush、手動実行、v*タグで動く。タグのときは、GitHub Releaseに.debを添付する。
+# Linuxブランチのpush、手動実行、v*タグで動く。タグのときは、GitHub Releaseに.debを添付する。
 on:
   push:
-    branches: [linux-packaging]
+    branches: [Linux]
     tags: ['v*']
   workflow_dispatch:
 
