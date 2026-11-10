@@ -2,10 +2,13 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app_window;
+mod editor;
 mod logger;
 mod recent;
 mod recent_menu;
+mod reload;
 mod resize;
+mod source_tab;
 mod tab_bar;
 mod titlebar;
 
@@ -20,7 +23,7 @@ use app_window::{APP_NAME, AppWindow};
 /// デスクトップ環境がウィンドウを識別する名前。`packaging/linux/io.github.tora2rou.Chihayaburu.desktop`のファイル名と同じ。
 const APP_ID: &str = "io.github.tora2rou.Chihayaburu";
 
-const USAGE: &str = "使い方: pdf_view_app [file.pdf]";
+const USAGE: &str = "使い方: pdf_view_app [file.pdf | file.epub | file.typ | file.tex]";
 
 /// コマンドライン引数(プログラム名を除く)から、開くPDFのパスを取り出す。
 /// 引数がなければ`None`(PDFを開かずに起動する)。
@@ -35,8 +38,12 @@ fn pdf_path_from_args(mut args: impl Iterator<Item = String>) -> Result<Option<P
 }
 
 /// 起動時に開くもの。開けなかったときは、そのエラーをウィンドウに出す。
+#[derive(Default)]
 struct Startup {
+    /// 読み込み済みのPDF。
     document: Option<(PathBuf, Arc<PdfDocument>)>,
+    /// Typst・LaTeXの文書。ウィンドウを開いてからコンパイルする(重いので、ウィンドウは先に出す)。
+    source: Option<PathBuf>,
     error: Option<String>,
 }
 
@@ -55,17 +62,27 @@ fn open_window(startup: Startup, cx: &mut App) {
         app_id: Some(APP_ID.into()),
         ..Default::default()
     };
-    let Startup { document, error } = startup;
-    cx.open_window(options, |window, cx| {
-        cx.new(|cx| {
-            let mut app = AppWindow::new(document, recent::recent_files_path(), window, cx);
-            if let Some(error) = error {
-                app.show_error(error, cx);
-            }
-            app
+    let Startup {
+        document,
+        source,
+        error,
+    } = startup;
+    let window = cx
+        .open_window(options, |window, cx| {
+            cx.new(|cx| {
+                let mut app = AppWindow::new(document, recent::recent_files_path(), window, cx);
+                if let Some(error) = error {
+                    app.show_error(error, cx);
+                }
+                app
+            })
         })
-    })
-    .expect("ウィンドウを開けませんでした");
+        .expect("ウィンドウを開けませんでした");
+    if let Some(path) = source {
+        window
+            .update(cx, |app, window, cx| app.open_path(path, window, cx))
+            .ok();
+    }
     cx.activate(true);
 }
 
@@ -81,24 +98,26 @@ fn main() -> ExitCode {
     // 起動時に指定されたファイルが開けないときも、ウィンドウは開いてエラーを表示する
     // (エクスプローラーから開いたときなど、端末が無くてもエラーが分かるように)。
     let startup = match path {
+        // Typst・LaTeXの文書は、コンパイルに失敗してもエラーつきで開くので、ここでは読まない。
+        Some(path) if source_tab::is_source(&path) => Startup {
+            source: Some(path),
+            ..Default::default()
+        },
         Some(path) => match PdfDocument::open(&path) {
             Ok(document) => Startup {
                 document: Some((path, Arc::new(document))),
-                error: None,
+                ..Default::default()
             },
             Err(e) => {
                 let message = format!("{}: {e}", path.display());
                 eprintln!("{message}");
                 Startup {
-                    document: None,
                     error: Some(message),
+                    ..Default::default()
                 }
             }
         },
-        None => Startup {
-            document: None,
-            error: None,
-        },
+        None => Startup::default(),
     };
     application().run(move |cx: &mut App| {
         pdf_viewer::init(cx);
